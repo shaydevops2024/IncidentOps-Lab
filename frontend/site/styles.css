@@ -73,3 +73,49 @@ button:hover {
   font-size: 12px;
   padding: 6px;
 }
+
+#footer-action {
+  margin-top: 40px;
+  display: flex;
+  justify-content: center;
+}
+
+#footer-action .card {
+  width: 360px;
+  text-align: center;
+}
+
+/* -----------------------------
+   Auto-Remediation Button
+   ----------------------------- */
+
+.auto-remediation-btn {
+  background: #22c55e;
+  color: #022c22;
+  border: none;
+  padding: 14px 28px;
+  font-size: 16px;
+  font-weight: bold;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.auto-remediation-btn {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  width: 100%;
+}
+
+
+.auto-remediation-btn:hover {
+  background: #16a34a;
+}
+
+.auto-remediation-text {
+  margin-top: 10px;
+  font-size: 13px;
+  color: #94a3b8;
+}
+

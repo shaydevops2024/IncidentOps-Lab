@@ -8,6 +8,7 @@ from .mq import publish
 import psutil
 import shutil
 
+
 app = FastAPI(title="IncidentOps Arena Backend")
 
 # -----------------------------
@@ -24,12 +25,30 @@ REQUESTS = Counter(
 # (authoritative state for UI)
 # -----------------------------
 SERVICES = {
-    # Core platform
+    "postgres": {
+        "status": "up",
+        "started": datetime.utcnow().isoformat(),
+        "recovery": "auto-remediator (idle)"
+    },
+    "redis": {
+        "status": "up",
+        "started": datetime.utcnow().isoformat(),
+        "recovery": "auto-remediator (idle)"
+    },
+    "rabbitmq": {
+        "status": "up",
+        "started": datetime.utcnow().isoformat(),
+        "recovery": "auto-remediator (idle)"
+    },
     "backend": {
         "status": "up",
         "started": datetime.utcnow().isoformat(),
         "recovery": "self"
     },
+
+    # -----------------------------
+    # Added platform services (UI windows)
+    # -----------------------------
     "worker": {
         "status": "up",
         "started": datetime.utcnow().isoformat(),
@@ -46,24 +65,7 @@ SERVICES = {
         "recovery": "manual"
     },
 
-    # Data & messaging
-    "postgres": {
-        "status": "up",
-        "started": datetime.utcnow().isoformat(),
-        "recovery": "auto-remediator"
-    },
-    "redis": {
-        "status": "up",
-        "started": datetime.utcnow().isoformat(),
-        "recovery": "auto-remediator"
-    },
-    "rabbitmq": {
-        "status": "up",
-        "started": datetime.utcnow().isoformat(),
-        "recovery": "auto-remediator"
-    },
-
-    # Observability
+    # Observability services
     "prometheus": {
         "status": "up",
         "started": datetime.utcnow().isoformat(),
@@ -88,7 +90,7 @@ SERVICES = {
 
 # -----------------------------
 # In-memory logs per service
-# (last 20 lines per service)
+# (last 20 lines)
 # -----------------------------
 LOGS = {service: [] for service in SERVICES}
 
@@ -108,25 +110,71 @@ def ensure_service(service: str):
 
 def get_system_metrics():
     # CPU
-    cpu_count = psutil.cpu_count(logical=True)
-    cpu_percent = psutil.cpu_percent(interval=0.5)
+    cpu_units = psutil.cpu_count(logical=True)
+    cpu_percent = psutil.cpu_percent(interval=0.3)
+    cpu_free = round(100 - cpu_percent, 1)
 
     # RAM
     mem = psutil.virtual_memory()
-    ram_total_gb = round(mem.total / (1024 ** 3), 2)
-    ram_free_gb = round(mem.available / (1024 ** 3), 2)
+    ram_total = round(mem.total / (1024 ** 3), 2)
+    ram_free = round(mem.available / (1024 ** 3), 2)
 
-    # Disk (root filesystem)
+    # DISK
     disk = shutil.disk_usage("/")
-    disk_total_gb = round(disk.total / (1024 ** 3), 2)
-    disk_free_gb = round(disk.free / (1024 ** 3), 2)
+    disk_total = round(disk.total / (1024 ** 3), 2)
+    disk_free = round(disk.free / (1024 ** 3), 2)
 
     return {
-        "cpu": f"{cpu_count} units, {100 - cpu_percent:.1f}% free",
-        "ram": f"{ram_total_gb} GB total, {ram_free_gb} GB free",
-        "disk": f"{disk_total_gb} GB total, {disk_free_gb} GB free"
+        "cpu": f"{cpu_units} units, {cpu_free}% free",
+        "ram": f"{ram_total} GB total, {ram_free} GB free",
+        "disk": f"{disk_total} GB total, {disk_free} GB free"
     }
 
+
+
+# -----------------------------
+# Remediation helpers (ADDED)
+# -----------------------------
+def _set_recovery_state(service: str, state: str):
+    """
+    Small helper to keep the Recovery field consistent.
+    Examples:
+      - auto-remediator (idle)
+      - auto-remediator (running)
+    """
+    # Only update if the service exists, and only for services we want to show this feature on.
+    if service in SERVICES:
+        if "auto-remediator" in SERVICES[service].get("recovery", ""):
+            SERVICES[service]["recovery"] = state
+
+
+def remediate_service(service: str):
+    """
+    Remediate a single service if it is DOWN.
+    This is intentionally deterministic and operator-triggered for demos.
+    """
+    ensure_service(service)
+
+    # Only remediate services that are down
+    if SERVICES[service]["status"] != "down":
+        log(service, "Auto-remediation skipped (service already UP)")
+        return False
+
+    # Mark running (only for the auto-remediator-tagged services)
+    _set_recovery_state(service, "auto-remediator (running)")
+    log(service, "Auto-remediation started")
+
+    # Simulated action: bring service back up
+    SERVICES[service]["status"] = "up"
+    SERVICES[service]["started"] = datetime.utcnow().isoformat()
+    set_status(service, "up")
+
+    publish(f"{service} auto-remediated")
+    log(service, "Auto-remediation completed")
+
+    # Back to idle
+    _set_recovery_state(service, "auto-remediator (idle)")
+    return True
 
 
 # -----------------------------
@@ -135,19 +183,13 @@ def get_system_metrics():
 
 @app.get("/status")
 def get_status_all():
-    """
-    Backward-compatible endpoint.
-    Existing UI calls still work.
-    """
     REQUESTS.labels(endpoint="/status").inc()
     return SERVICES
 
 
+# Added endpoint for dynamic discovery (safe to keep; UI can use it)
 @app.get("/services")
 def get_services():
-    """
-    New endpoint for dynamic UI discovery.
-    """
     REQUESTS.labels(endpoint="/services").inc()
     return SERVICES
 
@@ -157,6 +199,11 @@ def get_logs(service: str):
     REQUESTS.labels(endpoint="/logs").inc()
     ensure_service(service)
     return LOGS[service]
+
+@app.get("/system")
+def system_metrics():
+    REQUESTS.labels(endpoint="/system").inc()
+    return get_system_metrics()
 
 
 @app.post("/ping/{service}")
@@ -232,13 +279,44 @@ def resolve_incident(service: str):
     return {"service": service, "status": "resolved"}
 
 
+# -----------------------------
+# NEW: Operator-triggered global remediation endpoint
+# -----------------------------
+@app.post("/remediate")
+def run_remediation():
+    """
+    Trigger auto-remediation for ALL services that are currently DOWN.
+    This is intentionally operator-triggered (button in UI) for demos.
+    """
+    REQUESTS.labels(endpoint="/remediate").inc()
+
+    remediated = []
+    skipped = []
+
+    # We only remediate services that are down.
+    # Services that are up are skipped (and logged).
+    for service in SERVICES.keys():
+        if SERVICES[service]["status"] == "down":
+            ok = remediate_service(service)
+            if ok:
+                remediated.append(service)
+            else:
+                skipped.append(service)
+
+    # Log summary to backend log stream (visible in UI on backend card)
+    try:
+        log("backend", f"Remediation triggered. Remediated={remediated} Skipped={skipped}")
+    except Exception:
+        # If backend isn't in LOGS (it is), don't crash remediation endpoint
+        pass
+
+    return {
+        "status": "completed",
+        "services_remediated": remediated,
+        "services_skipped": skipped
+    }
+
+
 @app.get("/metrics", response_class=PlainTextResponse)
 def metrics():
     return generate_latest()
-
-
-@app.get("/system")
-def system_metrics():
-    REQUESTS.labels(endpoint="/system").inc()
-    return get_system_metrics()
-
